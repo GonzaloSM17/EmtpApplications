@@ -254,6 +254,7 @@ def print_result(
 
 
 if __name__ == "__main__":
+
     config = ParameterConfig(
         settling_time_range=ParameterRange(
             minimum=0.010,
@@ -264,7 +265,7 @@ if __name__ == "__main__":
             maximum=0.9,
         ),
         kqv_range=ParameterRange(
-            minimum=0.0,
+            minimum=1.0,
             maximum=2.0,
         ),
         settling_tolerance=0.05,
