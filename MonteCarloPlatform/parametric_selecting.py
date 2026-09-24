@@ -7,7 +7,6 @@ from typing import Any, Iterator
 from openpyxl import Workbook
 
 from com_client import EmtpComClient
-from emtp_utils import Design
 from parametric_calculating import (
     ParameterConfig,
     ParameterGenerator,
@@ -26,35 +25,37 @@ class GeneratorParameterRecord:
     generator_name: str
     generator_type: str
     in_service: int
+    unit_path: str | None = None
 
+    # Parameters to be written in EMTP
     kp: float | None = None
     ki: float | None = None
-    frt: int | None = None
     kqv: float | None = None
+    rrpw: float | None = None
 
-    settling_time: float | None = None
-    settling_tolerance: float | None = None
-    natural_frequency_rad_s: float | None = None
+    # Design variables / traceability
+    damping_ratio: float | None = None
     bandwidth_hz: float | None = None
-
-    attempts: int | None = None
-    stop_threshold_reached: bool | None = None
+    natural_frequency_rad_s: float | None = None
 
     @property
     def has_parameters(self) -> bool:
         return self.in_service == 1
 
     @property
-    def parameters(self) -> dict[str, float | int]:
-        """Parameters that a future setter must apply to the EMTP unit."""
+    def parameters(self) -> dict[str, float]:
+        """
+        Parameters that a future setter must apply
+        to the corresponding EMTP unit.
+        """
         if not self.has_parameters:
             return {}
 
         values = {
             "kp": self.kp,
             "ki": self.ki,
-            "frt": self.frt,
             "kqv": self.kqv,
+            "rrpw": self.rrpw,
         }
 
         return {
@@ -83,13 +84,27 @@ class ParameterRun:
     def records_by_name(self) -> dict[str, GeneratorParameterRecord]:
         return {record.generator_name: record for record in self.records}
 
-    def get_record(self, generator_name: str) -> GeneratorParameterRecord:
+    def get_record(
+        self,
+        generator_name: str,
+    ) -> GeneratorParameterRecord:
         try:
             return self.records_by_name[generator_name]
+
         except KeyError as error:
             raise KeyError(
-                f"Generator '{generator_name}' not found in {self.name}."
+                f"Generator '{generator_name}' " f"not found in {self.name}."
             ) from error
+
+
+@dataclass(frozen=True, slots=True)
+class ParameterTarget:
+    """EMTP unit metadata shared by every run in a study."""
+
+    generator_name: str
+    generator_type: str
+    unit_path: str
+    in_service: int
 
 
 # =============================================================================
@@ -109,6 +124,7 @@ class ParameterAssignment:
             raise ValueError("number_of_runs must be greater than zero.")
 
         name = name.strip()
+
         if not name:
             raise ValueError("name cannot be empty.")
 
@@ -117,7 +133,6 @@ class ParameterAssignment:
         self.number_of_runs = number_of_runs
         self.name = name
 
-        # Persistent output of the assignment.
         self.runs: tuple[ParameterRun, ...] = ()
 
     def __iter__(self) -> Iterator[ParameterRun]:
@@ -139,19 +154,28 @@ class ParameterAssignment:
         return sum(len(run) for run in self.runs)
 
     def execute(self) -> ParameterAssignment:
-        units = self._extract_units()
-
-        self.runs = tuple(
-            self._generate_run(
-                run_id=run_id,
-                units=units,
-            )
-            for run_id in range(1, self.number_of_runs + 1)
-        )
+        self.runs = tuple(self.iter_runs())
 
         return self
 
-    def get_run(self, run_id: int) -> ParameterRun:
+    def iter_runs(self) -> Iterator[ParameterRun]:
+        """Yield parameter runs without retaining the whole study in memory.
+
+        ``execute()`` remains available for the existing small-study workflow.
+        Large studies should consume this iterator and persist runs in blocks.
+        """
+        targets = self._extract_targets()
+
+        for run_id in range(1, self.number_of_runs + 1):
+            yield self._generate_run(
+                run_id=run_id,
+                targets=targets,
+            )
+
+    def get_run(
+        self,
+        run_id: int,
+    ) -> ParameterRun:
         self._require_execution()
 
         for run in self.runs:
@@ -170,53 +194,81 @@ class ParameterAssignment:
     def _generate_run(
         self,
         run_id: int,
-        units: tuple[tuple[str, Any], ...],
+        targets: tuple[ParameterTarget, ...],
     ) -> ParameterRun:
         return ParameterRun(
             run_id=run_id,
             records=tuple(
-                self._generate_record(
-                    generator_type=generator_type,
-                    unit=unit,
-                )
-                for generator_type, unit in units
+                self._generate_record(target=target)
+                for target in targets
             ),
         )
 
-    def _extract_units(self) -> tuple[tuple[str, Any], ...]:
-        extractor = UnitExtractor(emtp_object=self.emtp_object)
+    def _extract_targets(
+        self,
+    ) -> tuple[ParameterTarget, ...]:
+        extractor = UnitExtractor(
+            emtp_object=self.emtp_object,
+        )
+
         extractor.execute()
 
-        units = tuple(
+        units = (
             [("PV", unit) for unit in extractor.units.pv_units]
             + [("WF", unit) for unit in extractor.units.wf_units]
             + [("BESS", unit) for unit in extractor.units.bess_units]
         )
 
         if not units:
-            raise RuntimeError("No PV or WF units were found.")
+            raise RuntimeError("No PV, WF or BESS units were found.")
 
-        return units
+        return tuple(
+            self._build_target(
+                generator_type=generator_type,
+                unit=unit,
+            )
+            for generator_type, unit in units
+        )
 
-    def _generate_record(
-        self,
+    @staticmethod
+    def _build_target(
         generator_type: str,
         unit: Any,
-    ) -> GeneratorParameterRecord:
+    ) -> ParameterTarget:
         in_service = int(unit.get_in_service())
+
         generator_name = str(unit.object.name)
+        unit_path = str(getattr(unit, "unit_path", generator_name))
 
         if in_service not in (0, 1):
             raise ValueError(
-                f"Invalid in-service value for " f"'{generator_name}': {in_service}."
+                f"Invalid in-service value for "
+                f"'{generator_name}': "
+                f"{in_service}."
             )
 
-        result = self.parameter_generator.generate() if in_service == 1 else None
-
-        return self._build_record(
+        return ParameterTarget(
             generator_name=generator_name,
             generator_type=generator_type,
+            unit_path=unit_path,
             in_service=in_service,
+        )
+
+    def _generate_record(
+        self,
+        target: ParameterTarget,
+    ) -> GeneratorParameterRecord:
+        result = (
+            self.parameter_generator.generate()
+            if target.in_service == 1
+            else None
+        )
+
+        return self._build_record(
+            generator_name=target.generator_name,
+            generator_type=target.generator_type,
+            in_service=target.in_service,
+            unit_path=target.unit_path,
             result=result,
         )
 
@@ -225,6 +277,7 @@ class ParameterAssignment:
         generator_name: str,
         generator_type: str,
         in_service: int,
+        unit_path: str,
         result: ParameterResult | None,
     ) -> GeneratorParameterRecord:
         if result is None:
@@ -232,22 +285,21 @@ class ParameterAssignment:
                 generator_name=generator_name,
                 generator_type=generator_type,
                 in_service=in_service,
+                unit_path=unit_path,
             )
 
         return GeneratorParameterRecord(
             generator_name=generator_name,
             generator_type=generator_type,
             in_service=in_service,
+            unit_path=unit_path,
             kp=result.params.kp,
             ki=result.params.ki,
-            frt=result.params.frt,
             kqv=result.params.kqv,
-            settling_time=result.settling_time,
-            settling_tolerance=result.settling_tolerance,
-            natural_frequency_rad_s=result.natural_frequency_rad_s,
+            rrpw=result.params.rrpw,
+            damping_ratio=result.damping_ratio,
             bandwidth_hz=result.bandwidth_hz,
-            attempts=result.attempts,
-            stop_threshold_reached=result.stop_threshold_reached,
+            natural_frequency_rad_s=(result.natural_frequency_rad_s),
         )
 
 
@@ -262,21 +314,23 @@ class ParameterExcelExporter:
         "GeneratorName",
         "GeneratorType",
         "InService",
+        "DampingRatio",
+        "Bandwidth_Hz",
+        "NaturalFrequency_rad_s",
         "Kp",
         "Ki",
-        "FRT",
         "Kqv",
-        "SettlingTime_s",
-        "SettlingTolerance",
-        "NaturalFrequency_rad_s",
-        "Bandwidth_Hz",
-        "Attempts",
-        "StopThresholdReached",
+        "Rrpw",
     )
 
-    def __init__(self, maximum_sheets_per_workbook: int = 250) -> None:
+    def __init__(
+        self,
+        maximum_sheets_per_workbook: int = 100,
+    ) -> None:
         if maximum_sheets_per_workbook <= 0:
-            raise ValueError("maximum_sheets_per_workbook must be greater than zero.")
+            raise ValueError(
+                "maximum_sheets_per_workbook " "must be greater than zero."
+            )
 
         self.maximum_sheets_per_workbook = maximum_sheets_per_workbook
 
@@ -288,7 +342,11 @@ class ParameterExcelExporter:
         assignment._require_execution()
 
         output_directory = Path(output_directory)
-        output_directory.mkdir(parents=True, exist_ok=True)
+
+        output_directory.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
         exported_files: list[Path] = []
 
@@ -323,6 +381,7 @@ class ParameterExcelExporter:
 
         for run in runs:
             worksheet = workbook.create_sheet(run.name)
+
             worksheet.append(self.HEADERS)
 
             for record in run:
@@ -332,16 +391,13 @@ class ParameterExcelExporter:
                         record.generator_name,
                         record.generator_type,
                         record.in_service,
+                        record.damping_ratio,
+                        record.bandwidth_hz,
+                        record.natural_frequency_rad_s,
                         record.kp,
                         record.ki,
-                        record.frt,
                         record.kqv,
-                        record.settling_time,
-                        record.settling_tolerance,
-                        record.natural_frequency_rad_s,
-                        record.bandwidth_hz,
-                        record.attempts,
-                        record.stop_threshold_reached,
+                        record.rrpw,
                     )
                 )
 
@@ -354,30 +410,30 @@ class ParameterExcelExporter:
 
 
 if __name__ == "__main__":
+
+    from com_client import *
+
     emtp_client = EmtpComClient(attach_existing=True)
+
     emtp_object = emtp_client.emtp_object
 
-    # Design.open_design(emtp_object=emtp_object)
-
     parameter_config = ParameterConfig(
-        settling_time_range=ParameterRange(
-            minimum=0.030,
-            maximum=0.150,
-        ),
         damping_ratio_range=ParameterRange(
             minimum=0.6,
-            maximum=0.8,
+            maximum=1.0,
+        ),
+        bandwidth_range=ParameterRange(
+            minimum=2.5,
+            maximum=15.0,
         ),
         kqv_range=ParameterRange(
-            minimum=0.0,
+            minimum=1.0,
             maximum=2.0,
         ),
-        settling_tolerance=0.05,
-        grid_voltage=1.0,
-        minimum_bandwidth_hz=5.0,
-        stop_bandwidth_hz=60.0,
-        maximum_bandwidth_hz=60.0,
-        maximum_attempts=10,
+        rrpw_range=ParameterRange(
+            minimum=0.5,
+            maximum=1.0,
+        ),
     )
 
     parameter_assignment = ParameterAssignment(
@@ -389,7 +445,6 @@ if __name__ == "__main__":
 
     parameter_assignment.execute()
 
-    # Persistent access after execute().
     first_run = parameter_assignment.get_run(1)
 
     for record in first_run:
@@ -400,7 +455,7 @@ if __name__ == "__main__":
         )
 
     exporter = ParameterExcelExporter(
-        maximum_sheets_per_workbook=1000,
+        maximum_sheets_per_workbook=100,
     )
 
     exported_files = exporter.export(

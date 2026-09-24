@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import log, pi, sqrt
+from math import pi, sqrt
 from random import Random
+from typing import ClassVar
+
+# =============================================================================
+# Parameter ranges and configuration
+# =============================================================================
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,83 +19,88 @@ class ParameterRange:
         if self.minimum > self.maximum:
             raise ValueError("ParameterRange.minimum cannot be greater than maximum.")
 
-    def sample(self, rng: Random) -> float:
-        return rng.uniform(self.minimum, self.maximum)
+    def sample(
+        self,
+        rng: Random,
+    ) -> float:
+        return rng.uniform(
+            self.minimum,
+            self.maximum,
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class ParameterConfig:
-    # Design-variable ranges
-    settling_time_range: ParameterRange
-    damping_ratio_range: ParameterRange
-    kqv_range: ParameterRange
+    """Ranges for the parameter groups included in a study.
 
-    # Fixed design values
-    settling_tolerance: float = 0.05
-    grid_voltage: float = 1.0
+    ``Kp`` and ``Ki`` are a single group because both are derived from the
+    damping ratio and bandwidth. ``Kqv`` and ``Rrpw`` can be enabled
+    independently by supplying their range.
+    """
 
-    # Bandwidth verification and search limits
-    minimum_bandwidth_hz: float = 5.0
-    stop_bandwidth_hz: float = 10.0
-    maximum_bandwidth_hz: float = 100.0
+    damping_ratio_range: ParameterRange | None = None
+    bandwidth_range: ParameterRange | None = None
+    kqv_range: ParameterRange | None = None
+    rrpw_range: ParameterRange | None = None
 
-    # Maximum search effort per generated instance
-    maximum_attempts: int = 100
+    GRID_VOLTAGE: ClassVar[float] = 1.0
 
     def __post_init__(self) -> None:
-        if self.settling_time_range.minimum <= 0.0:
-            raise ValueError("Settling time must be greater than zero.")
-
-        if not 0.0 < self.settling_tolerance < 1.0:
-            raise ValueError("Settling tolerance must be between 0 and 1.")
-
-        if not (
-            0.0 < self.damping_ratio_range.minimum < 1.0
-            and 0.0 < self.damping_ratio_range.maximum < 1.0
-        ):
-            raise ValueError("Damping ratio limits must be between 0 and 1.")
-
-        if self.kqv_range.minimum < 0.0:
-            raise ValueError("Kqv cannot be negative.")
-
-        if self.grid_voltage <= 0.0:
-            raise ValueError("Grid voltage must be greater than zero.")
-
-        if not (
-            0.0
-            < self.minimum_bandwidth_hz
-            < self.stop_bandwidth_hz
-            <= self.maximum_bandwidth_hz
+        has_kp_ki = (
+            self.damping_ratio_range is not None
+            or self.bandwidth_range is not None
+        )
+        if has_kp_ki and (
+            self.damping_ratio_range is None or self.bandwidth_range is None
         ):
             raise ValueError(
-                "Bandwidth limits must satisfy: " "0 < minimum < stop <= maximum."
+                "Kp and Ki require both damping_ratio_range and bandwidth_range."
             )
 
-        if self.maximum_attempts <= 0:
-            raise ValueError("Maximum attempts must be greater than zero.")
+        if not has_kp_ki and self.kqv_range is None and self.rrpw_range is None:
+            raise ValueError("Select at least one parameter group to generate.")
+
+        if self.damping_ratio_range is not None and not (
+            0.0 < self.damping_ratio_range.minimum <= 1.0
+            and 0.0 < self.damping_ratio_range.maximum <= 1.0
+        ):
+            raise ValueError("Damping ratio limits must satisfy 0 < xi <= 1.")
+
+        if self.bandwidth_range is not None and self.bandwidth_range.minimum <= 0.0:
+            raise ValueError("Bandwidth must be greater than zero.")
+
+        if self.kqv_range is not None and self.kqv_range.minimum < 0.0:
+            raise ValueError("Kqv cannot be negative.")
+
+        if self.rrpw_range is not None and self.rrpw_range.minimum < 0.0:
+            raise ValueError("Rrpw cannot be negative.")
+
+
+# =============================================================================
+# Parameter result
+# =============================================================================
 
 
 @dataclass(frozen=True, slots=True)
 class Params:
-    kp: float
-    ki: float
-    frt: int
-    kqv: float
+    kp: float | None = None
+    ki: float | None = None
+    kqv: float | None = None
+    rrpw: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ParameterResult:
     params: Params
 
-    settling_time: float
-    settling_tolerance: float
-    damping_ratio: float
+    damping_ratio: float | None = None
+    bandwidth_hz: float | None = None
+    natural_frequency_rad_s: float | None = None
 
-    natural_frequency_rad_s: float
-    bandwidth_hz: float
 
-    attempts: int
-    stop_threshold_reached: bool
+# =============================================================================
+# Parameter generator
+# =============================================================================
 
 
 class ParameterGenerator:
@@ -101,179 +111,150 @@ class ParameterGenerator:
     ) -> None:
         self.config = config
         self.rng = rng or Random()
-        self._rad_s_to_hz = 1.0 / (2.0 * pi)
 
-    def generate(self) -> ParameterResult:
-        """
-        Generate one valid parameter set.
-
-        Rules:
-        - Evaluate at most maximum_attempts candidates.
-        - A candidate is valid when:
-
-              minimum_bandwidth_hz
-              < bandwidth_hz
-              < maximum_bandwidth_hz
-
-        - Retain the valid candidate with the lowest bandwidth.
-        - Stop early when:
-
-              bandwidth_hz <= stop_bandwidth_hz
-
-        - If the stop threshold is not reached, return the valid
-          candidate with the lowest bandwidth found.
-        """
-
-        best_result: ParameterResult | None = None
-
-        for attempt in range(
-            1,
-            self.config.maximum_attempts + 1,
-        ):
-            result = self._generate_candidate(
-                attempt=attempt,
-            )
-
-            if not self._is_valid_bandwidth(result.bandwidth_hz):
-                continue
-
-            if best_result is None or result.bandwidth_hz < best_result.bandwidth_hz:
-                best_result = result
-
-            if result.stop_threshold_reached:
-                return result
-
-        if best_result is None:
-            raise RuntimeError(
-                "No valid parameter set was found after "
-                f"{self.config.maximum_attempts} attempts. "
-                "Required bandwidth: "
-                f"{self.config.minimum_bandwidth_hz:.2f} Hz "
-                "< bandwidth < "
-                f"{self.config.maximum_bandwidth_hz:.2f} Hz."
-            )
-
-        return best_result
-
-    def _generate_candidate(
+    def generate(
         self,
-        attempt: int,
     ) -> ParameterResult:
-        settling_time = round(
-            self.config.settling_time_range.sample(self.rng),
-            3,
+        """
+        Generate one parameter set.
+
+        Independent stochastic variables:
+        - damping ratio
+        - bandwidth
+        - Kqv
+        - Rrpw
+
+        Derived variables:
+        - natural frequency
+        - Kp
+        - Ki
+        """
+
+        damping_ratio: float | None = None
+        bandwidth_hz: float | None = None
+        natural_frequency_rad_s: float | None = None
+        kp: float | None = None
+        ki: float | None = None
+        kqv: float | None = None
+        rrpw: float | None = None
+
+        if self.config.damping_ratio_range is not None:
+            damping_ratio = round(
+                self.config.damping_ratio_range.sample(self.rng),
+                3,
+            )
+            bandwidth_hz = round(
+                self.config.bandwidth_range.sample(self.rng),
+                2,
+            )
+            natural_frequency_rad_s = self._calculate_natural_frequency(
+                damping_ratio=damping_ratio,
+                bandwidth_hz=bandwidth_hz,
+            )
+            kp = round(
+                2.0
+                * damping_ratio
+                * natural_frequency_rad_s
+                / ParameterConfig.GRID_VOLTAGE,
+                2,
+            )
+            ki = round(
+                natural_frequency_rad_s**2 / ParameterConfig.GRID_VOLTAGE,
+                2,
+            )
+
+        if self.config.kqv_range is not None:
+            kqv = round(self.config.kqv_range.sample(self.rng), 1)
+
+        if self.config.rrpw_range is not None:
+            rrpw = round(self.config.rrpw_range.sample(self.rng), 1)
+
+        params = Params(
+            kp=kp,
+            ki=ki,
+            kqv=kqv,
+            rrpw=rrpw,
         )
 
-        damping_ratio = round(
-            self.config.damping_ratio_range.sample(self.rng),
-            3,
+        return ParameterResult(
+            params=params,
+            damping_ratio=damping_ratio,
+            bandwidth_hz=bandwidth_hz,
+            natural_frequency_rad_s=(
+                round(natural_frequency_rad_s, 2)
+                if natural_frequency_rad_s is not None
+                else None
+            ),
         )
 
-        settling_tolerance = self.config.settling_tolerance
-
-        envelope_factor = 1.0 / sqrt(1.0 - damping_ratio**2)
-
-        bandwidth_factor = sqrt(
+    @staticmethod
+    def _calculate_bandwidth_factor(
+        damping_ratio: float,
+    ) -> float:
+        return sqrt(
             1.0
             + 2.0 * damping_ratio**2
             + sqrt((1.0 + 2.0 * damping_ratio**2) ** 2 + 1.0)
         )
 
-        natural_frequency_raw = log(envelope_factor / settling_tolerance) / (
-            damping_ratio * settling_time
-        )
-
-        kp_raw = 2.0 * damping_ratio * natural_frequency_raw / self.config.grid_voltage
-
-        ki_raw = natural_frequency_raw**2 / self.config.grid_voltage
-
-        bandwidth_raw = natural_frequency_raw * bandwidth_factor * self._rad_s_to_hz
-
-        params = Params(
-            kp=round(kp_raw, 2),
-            ki=round(ki_raw, 2),
-            frt=self.rng.choice((0, 1)),
-            kqv=round(
-                self.config.kqv_range.sample(self.rng),
-                2,
-            ),
-        )
-
-        return ParameterResult(
-            params=params,
-            settling_time=settling_time,
-            settling_tolerance=settling_tolerance,
+    def _calculate_natural_frequency(
+        self,
+        damping_ratio: float,
+        bandwidth_hz: float,
+    ) -> float:
+        bandwidth_factor = self._calculate_bandwidth_factor(
             damping_ratio=damping_ratio,
-            natural_frequency_rad_s=round(
-                natural_frequency_raw,
-                2,
-            ),
-            bandwidth_hz=round(
-                bandwidth_raw,
-                2,
-            ),
-            attempts=attempt,
-            stop_threshold_reached=(self._stop_threshold_reached(bandwidth_raw)),
         )
 
-    def _is_valid_bandwidth(
-        self,
-        bandwidth_hz: float,
-    ) -> bool:
-        return (
-            self.config.minimum_bandwidth_hz
-            < bandwidth_hz
-            < self.config.maximum_bandwidth_hz
-        )
+        return 2.0 * pi * bandwidth_hz / bandwidth_factor
 
-    def _stop_threshold_reached(
-        self,
-        bandwidth_hz: float,
-    ) -> bool:
-        return (
-            self.config.minimum_bandwidth_hz
-            < bandwidth_hz
-            <= self.config.stop_bandwidth_hz
-        )
+
+# =============================================================================
+# Print helper
+# =============================================================================
 
 
 def print_result(
     result: ParameterResult,
 ) -> None:
-    print(f"Settling time:      " f"{result.settling_time:.3f} s")
-    print(f"Tolerance:          " f"{result.settling_tolerance:.2f}")
-    print(f"Damping ratio:      " f"{result.damping_ratio:.3f}")
-    print(f"Natural frequency:  " f"{result.natural_frequency_rad_s:.2f} rad/s")
-    print(f"Bandwidth:          " f"{result.bandwidth_hz:.2f} Hz")
-    print(f"Attempts:           " f"{result.attempts}")
-    print(f"Stop threshold:     " f"{result.stop_threshold_reached}")
-    print(f"Kp:                 " f"{result.params.kp:.2f}")
-    print(f"Ki:                 " f"{result.params.ki:.2f}")
-    print(f"FRT:                " f"{result.params.frt}")
-    print(f"Kqv:                " f"{result.params.kqv:.2f}")
+    if result.damping_ratio is not None:
+        print(f"Damping ratio:      {result.damping_ratio:.3f}")
+        print(f"Bandwidth:          {result.bandwidth_hz:.2f} Hz")
+        print(f"Natural frequency:  {result.natural_frequency_rad_s:.2f} rad/s")
+        print(f"Kp:                 {result.params.kp:.2f}")
+        print(f"Ki:                 {result.params.ki:.2f}")
+
+    if result.params.kqv is not None:
+        print(f"Kqv:                {result.params.kqv:.1f}")
+
+    if result.params.rrpw is not None:
+        print(f"Rrpw:               {result.params.rrpw:.1f}")
+
+
+# =============================================================================
+# Main
+# =============================================================================
 
 
 if __name__ == "__main__":
 
     config = ParameterConfig(
-        settling_time_range=ParameterRange(
-            minimum=0.010,
-            maximum=0.150,
-        ),
         damping_ratio_range=ParameterRange(
-            minimum=0.5,
-            maximum=0.9,
+            minimum=0.6,
+            maximum=1.0,
+        ),
+        bandwidth_range=ParameterRange(
+            minimum=2.5,
+            maximum=15.0,
         ),
         kqv_range=ParameterRange(
             minimum=1.0,
             maximum=2.0,
         ),
-        settling_tolerance=0.05,
-        grid_voltage=1.0,
-        minimum_bandwidth_hz=5.0,
-        stop_bandwidth_hz=10.0,
-        maximum_bandwidth_hz=100.0,
-        maximum_attempts=100,
+        rrpw_range=ParameterRange(
+            minimum=0.1,
+            maximum=1.0,
+        ),
     )
 
     generator = ParameterGenerator(
