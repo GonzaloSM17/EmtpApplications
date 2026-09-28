@@ -198,10 +198,7 @@ class ParameterAssignment:
     ) -> ParameterRun:
         return ParameterRun(
             run_id=run_id,
-            records=tuple(
-                self._generate_record(target=target)
-                for target in targets
-            ),
+            records=tuple(self._generate_record(target=target) for target in targets),
         )
 
     def _extract_targets(
@@ -215,12 +212,13 @@ class ParameterAssignment:
 
         units = (
             [("PV", unit) for unit in extractor.units.pv_units]
+            + [("DER", unit) for unit in extractor.units.der_units]
             + [("WF", unit) for unit in extractor.units.wf_units]
             + [("BESS", unit) for unit in extractor.units.bess_units]
         )
 
         if not units:
-            raise RuntimeError("No PV, WF or BESS units were found.")
+            raise RuntimeError("No PV, DER, WF or BESS units were found.")
 
         return tuple(
             self._build_target(
@@ -258,11 +256,7 @@ class ParameterAssignment:
         self,
         target: ParameterTarget,
     ) -> GeneratorParameterRecord:
-        result = (
-            self.parameter_generator.generate()
-            if target.in_service == 1
-            else None
-        )
+        result = self.parameter_generator.generate() if target.in_service == 1 else None
 
         return self._build_record(
             generator_name=target.generator_name,
@@ -296,7 +290,7 @@ class ParameterAssignment:
             kp=result.params.kp,
             ki=result.params.ki,
             kqv=result.params.kqv,
-            rrpw=result.params.rrpw,
+            rrpw=result.params.rrpw if generator_type != "BESS" else None,
             damping_ratio=result.damping_ratio,
             bandwidth_hz=result.bandwidth_hz,
             natural_frequency_rad_s=(result.natural_frequency_rad_s),

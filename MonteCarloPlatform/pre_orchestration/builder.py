@@ -7,6 +7,7 @@ future orchestrator and worker.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from hashlib import sha256
@@ -20,6 +21,21 @@ from shutil import copy2
 from time import perf_counter
 from typing import Any, Iterator
 import os
+
+# The rest of MonteCarloPlatform and the shared EMTP utilities still use
+# direct imports. Keep this builder executable while that broader package
+# migration is intentionally deferred.
+PRE_ORCHESTRATION_DIRECTORY = Path(__file__).resolve().parent
+PLATFORM_DIRECTORY = PRE_ORCHESTRATION_DIRECTORY.parent
+APPLICATION_DIRECTORY = PLATFORM_DIRECTORY.parent
+for import_directory in (
+    PRE_ORCHESTRATION_DIRECTORY,
+    PLATFORM_DIRECTORY,
+    APPLICATION_DIRECTORY,
+):
+    import_directory_text = str(import_directory)
+    if import_directory_text not in sys.path:
+        sys.path.insert(0, import_directory_text)
 
 import tkinter as tk
 from tkinter import filedialog
@@ -57,7 +73,7 @@ class StudyBuilder:
     """Create a study folder and its parameter files.
 
     ``emtp_object`` is optional. When omitted, EMTP starts only after the
-    study directory and its ``base.ecf`` copy have been created.
+    study directory and its copied ECF model have been created.
     """
 
     def __init__(
@@ -93,7 +109,7 @@ class StudyBuilder:
         """
         source_model_path = self._resolve_ecf_path()
         study_id, study_directory = self._create_study_directory()
-        base_model_path = study_directory / "base.ecf"
+        base_model_path = study_directory / source_model_path.name
         LOGGER.info("Study %s: copying base model.", study_id)
         copy2(source_model_path, base_model_path)
         (study_directory / "runs").mkdir()
@@ -185,7 +201,7 @@ class StudyBuilder:
             LOGGER.info("Starting EMTP.")
             self._emtp_client = EmtpComClient()
             self.emtp_object = self._emtp_client.emtp_object
-        LOGGER.info("Opening base.ecf in EMTP.")
+        LOGGER.info("Opening copied model in EMTP.")
         Design.open_design(self.emtp_object, str(base_model_path))
         LOGGER.info("Base design opened.")
 
