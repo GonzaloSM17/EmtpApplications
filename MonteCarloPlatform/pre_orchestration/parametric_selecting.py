@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from openpyxl import Workbook
 
@@ -22,10 +22,12 @@ from unit_extractor import UnitExtractor
 
 @dataclass(frozen=True, slots=True)
 class GeneratorParameterRecord:
+    unit_id: str
     generator_name: str
     generator_type: str
     in_service: int
     unit_path: str | None = None
+    zone: str = ""
 
     # Parameters to be written in EMTP
     kp: float | None = None
@@ -101,10 +103,12 @@ class ParameterRun:
 class ParameterTarget:
     """EMTP unit metadata shared by every run in a study."""
 
+    unit_id: str
     generator_name: str
     generator_type: str
     unit_path: str
     in_service: int
+    zone: str
 
 
 # =============================================================================
@@ -119,6 +123,7 @@ class ParameterAssignment:
         parameter_generator: ParameterGenerator,
         number_of_runs: int,
         name: str = "ParametricStudy",
+        target_zones: Iterable[str] | None = None,
     ) -> None:
         if number_of_runs <= 0:
             raise ValueError("number_of_runs must be greater than zero.")
@@ -132,8 +137,27 @@ class ParameterAssignment:
         self.parameter_generator = parameter_generator
         self.number_of_runs = number_of_runs
         self.name = name
+        self.target_zones = self._normalize_target_zones(target_zones)
 
         self.runs: tuple[ParameterRun, ...] = ()
+
+    @staticmethod
+    def _normalize_target_zones(
+        target_zones: Iterable[str] | None,
+    ) -> tuple[str, ...] | None:
+        """Return None when the study must target every discovered zone."""
+        if target_zones is None:
+            return None
+
+        normalized: list[str] = []
+        for zone in target_zones:
+            if not isinstance(zone, str):
+                raise TypeError("target_zones values must be strings.")
+            name = zone.strip()
+            if name and name not in normalized:
+                normalized.append(name)
+
+        return tuple(normalized) or None
 
     def __iter__(self) -> Iterator[ParameterRun]:
         return iter(self.runs)
@@ -220,16 +244,30 @@ class ParameterAssignment:
         if not units:
             raise RuntimeError("No PV, DER, WF or BESS units were found.")
 
-        return tuple(
+        targets = tuple(
             self._build_target(
+                unit_id=f"unit_{index:06d}",
                 generator_type=generator_type,
                 unit=unit,
             )
-            for generator_type, unit in units
+            for index, (generator_type, unit) in enumerate(units, start=1)
         )
+        if self.target_zones is None:
+            return targets
+
+        selected_targets = tuple(
+            target for target in targets if target.zone in self.target_zones
+        )
+        if not selected_targets:
+            requested_zones = ", ".join(self.target_zones)
+            raise ValueError(
+                f"No parameterization targets were found for zones: {requested_zones}."
+            )
+        return selected_targets
 
     @staticmethod
     def _build_target(
+        unit_id: str,
         generator_type: str,
         unit: Any,
     ) -> ParameterTarget:
@@ -237,6 +275,7 @@ class ParameterAssignment:
 
         generator_name = str(unit.object.name)
         unit_path = str(getattr(unit, "unit_path", generator_name))
+        zone = str(unit.object.getAttribute("Zone") or "").strip()
 
         if in_service not in (0, 1):
             raise ValueError(
@@ -244,12 +283,18 @@ class ParameterAssignment:
                 f"'{generator_name}': "
                 f"{in_service}."
             )
+        if not zone:
+            raise ValueError(
+                f"Unit '{generator_name}' does not define the required Zone attribute."
+            )
 
         return ParameterTarget(
+            unit_id=unit_id,
             generator_name=generator_name,
             generator_type=generator_type,
             unit_path=unit_path,
             in_service=in_service,
+            zone=zone,
         )
 
     def _generate_record(
@@ -260,33 +305,41 @@ class ParameterAssignment:
 
         return self._build_record(
             generator_name=target.generator_name,
+            unit_id=target.unit_id,
             generator_type=target.generator_type,
             in_service=target.in_service,
             unit_path=target.unit_path,
+            zone=target.zone,
             result=result,
         )
 
     @staticmethod
     def _build_record(
         generator_name: str,
+        unit_id: str,
         generator_type: str,
         in_service: int,
         unit_path: str,
+        zone: str,
         result: ParameterResult | None,
     ) -> GeneratorParameterRecord:
         if result is None:
             return GeneratorParameterRecord(
+                unit_id=unit_id,
                 generator_name=generator_name,
                 generator_type=generator_type,
                 in_service=in_service,
                 unit_path=unit_path,
+                zone=zone,
             )
 
         return GeneratorParameterRecord(
+            unit_id=unit_id,
             generator_name=generator_name,
             generator_type=generator_type,
             in_service=in_service,
             unit_path=unit_path,
+            zone=zone,
             kp=result.params.kp,
             ki=result.params.ki,
             kqv=result.params.kqv,

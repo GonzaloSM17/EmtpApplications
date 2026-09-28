@@ -47,8 +47,7 @@ class ParameterConfig:
 
     def __post_init__(self) -> None:
         has_kp_ki = (
-            self.damping_ratio_range is not None
-            or self.bandwidth_range is not None
+            self.damping_ratio_range is not None or self.bandwidth_range is not None
         )
         if has_kp_ki and (
             self.damping_ratio_range is None or self.bandwidth_range is None
@@ -244,8 +243,8 @@ if __name__ == "__main__":
             maximum=1.0,
         ),
         bandwidth_range=ParameterRange(
-            minimum=2.5,
-            maximum=15.0,
+            minimum=5.0,
+            maximum=10.0,
         ),
         kqv_range=ParameterRange(
             minimum=1.0,

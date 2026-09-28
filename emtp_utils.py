@@ -200,7 +200,7 @@ class Design(Context):
             if path is not None:
                 design.saveAs(path)
             else:
-                design.save()
+                design.save
 
     @classmethod
     def save_copy(cls, emtp_object: Any, path: str | None = None) -> None:
@@ -212,7 +212,7 @@ class Design(Context):
     def close_design(cls, emtp_object: Any, save_path: str | None = None) -> None:
         if save_path is not None:
             cls.save(emtp_object, save_path)
-        cls.design(emtp_object).close()
+        cls.design(emtp_object).close
 
 
 # ----------------------------------------------------------------------

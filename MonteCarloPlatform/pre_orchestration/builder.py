@@ -53,7 +53,7 @@ from parametric_selecting import (
 )
 
 DEFAULT_OUTPUT_ROOT = Path(r"C:\MonteCarlo Cases")
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 LOGGER = logging.getLogger(__name__)
 
 
@@ -86,6 +86,7 @@ class StudyBuilder:
         output_root: str | Path = DEFAULT_OUTPUT_ROOT,
         block_size: int = 1_000,
         seed: int | None = None,
+        target_zones: tuple[str, ...] | None = None,
     ) -> None:
         if number_of_runs <= 0:
             raise ValueError("number_of_runs must be greater than zero.")
@@ -100,6 +101,7 @@ class StudyBuilder:
         self.output_root = Path(output_root)
         self.block_size = block_size
         self.seed = seed if seed is not None else randbits(64)
+        self.target_zones = target_zones
 
     def prepare(self) -> PreparedStudy:
         """Create a complete, validated study folder.
@@ -121,6 +123,7 @@ class StudyBuilder:
                 parameter_generator=self.parameter_generator,
                 number_of_runs=self.number_of_runs,
                 name=study_id,
+                target_zones=self.target_zones,
             )
             self.parameter_generator.rng = Random(self.seed)
             LOGGER.info("Inspecting units and generating parameters.")
@@ -137,6 +140,7 @@ class StudyBuilder:
                 base_model_path=base_model_path,
                 inventory=inventory,
                 parameter_files=parameter_files,
+                target_zones=assignment.target_zones,
             )
             self._write_json_atomically(manifest_path, manifest)
             LOGGER.info("Study ready: %s", study_directory)
@@ -323,6 +327,7 @@ class StudyBuilder:
         base_model_path: Path,
         inventory: list[dict[str, Any]],
         parameter_files: list[Path],
+        target_zones: tuple[str, ...] | None,
     ) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -338,6 +343,10 @@ class StudyBuilder:
                 "block_size": self.block_size,
                 "seed": self.seed,
                 "config": asdict(self.parameter_generator.config),
+            },
+            "selection": {
+                "target_zones": list(target_zones or ()),
+                "all_zones": target_zones is None,
             },
             "units": inventory,
             "run_directory": "runs",
@@ -362,10 +371,7 @@ class StudyBuilder:
     @staticmethod
     def _serialize_record(record: GeneratorParameterRecord) -> dict[str, Any]:
         return {
-            "unit_path": record.unit_path,
-            "generator_name": record.generator_name,
-            "generator_type": record.generator_type,
-            "in_service": record.in_service,
+            "unit_id": record.unit_id,
             "parameters": record.parameters,
             "design_variables": {
                 "damping_ratio": record.damping_ratio,
@@ -377,9 +383,12 @@ class StudyBuilder:
     @staticmethod
     def _inventory_entry(record: GeneratorParameterRecord) -> dict[str, Any]:
         return {
+            "unit_id": record.unit_id,
             "unit_path": record.unit_path,
             "generator_name": record.generator_name,
             "generator_type": record.generator_type,
+            "in_service": record.in_service,
+            "zone": record.zone,
         }
 
     @staticmethod
@@ -403,10 +412,7 @@ class StudyBuilder:
         """
         headers = (
             "RunId",
-            "UnitPath",
-            "GeneratorName",
-            "GeneratorType",
-            "InService",
+            "UnitId",
             "Kp",
             "Ki",
             "Kqv",
@@ -424,10 +430,7 @@ class StudyBuilder:
                     writer.writerow(
                         {
                             "RunId": run.run_id,
-                            "UnitPath": record.unit_path,
-                            "GeneratorName": record.generator_name,
-                            "GeneratorType": record.generator_type,
-                            "InService": record.in_service,
+                            "UnitId": record.unit_id,
                             "Kp": record.kp,
                             "Ki": record.ki,
                             "Kqv": record.kqv,
@@ -457,7 +460,7 @@ if __name__ == "__main__":
 
     parameter_config = ParameterConfig(
         damping_ratio_range=ParameterRange(minimum=0.6, maximum=1.0),
-        bandwidth_range=ParameterRange(minimum=2.5, maximum=15.0),
+        bandwidth_range=ParameterRange(minimum=2.0, maximum=10.0),
         # kqv_range=ParameterRange(minimum=1.0, maximum=2.0),
         # rrpw_range=ParameterRange(minimum=0.5, maximum=1.0),
     )
@@ -467,6 +470,7 @@ if __name__ == "__main__":
     builder = StudyBuilder(
         parameter_generator=ParameterGenerator(parameter_config),
         number_of_runs=1000,
+        target_zones=("Norte Grande",),
     )
 
     prepared_study = builder.prepare()

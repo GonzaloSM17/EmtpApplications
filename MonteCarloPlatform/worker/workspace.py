@@ -78,9 +78,11 @@ class RunWorkspace:
     def _write_parameters_csv(self, path: Path) -> None:
         headers = (
             "RunId",
+            "UnitId",
             "UnitPath",
             "GeneratorName",
             "GeneratorType",
+            "Zone",
             "InService",
             "Kp",
             "Ki",
@@ -97,9 +99,11 @@ class RunWorkspace:
                 writer.writerow(
                     {
                         "RunId": self.worker_input.run_id,
+                        "UnitId": unit.unit_id,
                         "UnitPath": unit.unit_path,
                         "GeneratorName": unit.generator_name,
                         "GeneratorType": unit.generator_type,
+                        "Zone": unit.zone,
                         "InService": unit.in_service,
                         "Kp": unit.parameters.get("kp"),
                         "Ki": unit.parameters.get("ki"),

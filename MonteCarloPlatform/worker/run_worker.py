@@ -1,15 +1,17 @@
 """The one-run worker lifecycle.
 
-The worker receives one self-contained ``WorkerInput``. Only workspace
-preparation is active at this stage; EMTP operations follow in later stages.
+The worker receives one self-contained ``WorkerInput`` and owns its complete
+EMTP lifecycle.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
 import json
+import logging
 import os
 from pathlib import Path
+from time import perf_counter
 
 from com_client import EmtpComClient
 from emtp_utils import Design, Simulation
@@ -17,6 +19,8 @@ from MonteCarloPlatform.worker.plant_setter import PlantSetter, PlantSetterRepor
 from MonteCarloPlatform.worker.result import WorkerResult
 from MonteCarloPlatform.worker.task import UnitParameters, WorkerInput
 from MonteCarloPlatform.worker.workspace import PreparedRunWorkspace, RunWorkspace
+
+LOGGER = logging.getLogger(__name__)
 
 
 class RunWorker:
@@ -29,43 +33,72 @@ class RunWorker:
 
     def execute(self, worker_input: WorkerInput) -> WorkerResult:
         started_at = datetime.now().astimezone()
+        started_timer = perf_counter()
         execution_id = f"{worker_input.study_id}_{worker_input.run_name}"
+        run_label = f"Run {worker_input.run_name}"
         workspace: PreparedRunWorkspace | None = None
+        LOGGER.info("%s: starting.", run_label)
 
         try:
             workspace = self._preparing_workspace(worker_input)
             self._update_status(workspace, "workspace_ready")
+            LOGGER.info("%s: workspace prepared.", run_label)
 
+            LOGGER.info("%s: starting EMTP.", run_label)
             self._start_emtp()
             self._update_status(workspace, "emtp_started")
 
+            LOGGER.info(
+                "%s: opening design '%s'.", run_label, workspace.model_path.name
+            )
             self._open_design(workspace)
             self._update_status(workspace, "design_opened")
 
+            LOGGER.info(
+                "%s: applying parameters to %d units.",
+                run_label,
+                len(worker_input.units),
+            )
             report = self._apply_parameters(worker_input)
             self._update_status(
                 workspace,
                 "parameters_applied",
                 parameterized_devices=len(report.changes),
             )
+            LOGGER.info(
+                "%s: parameters applied to %d devices.", run_label, len(report.changes)
+            )
 
+            LOGGER.info("%s: saving parameterized design.", run_label)
             self._save_design_after_parameterization()
             self._update_status(workspace, "saved_before_simulation")
 
+            LOGGER.info("%s: running load flow.", run_label)
             self._run_load_flow()
             self._update_status(workspace, "load_flow_completed")
+            LOGGER.info("%s: load flow completed.", run_label)
 
+            tmax = worker_input.simulation.get("tmax", 10.0)
+            LOGGER.info(
+                "%s: running time-domain simulation (tmax=%s).",
+                run_label,
+                tmax,
+            )
             self._run_time_domain_simulation(worker_input)
             self._update_status(workspace, "time_domain_completed")
+            LOGGER.info("%s: time-domain simulation completed.", run_label)
 
+            LOGGER.info("%s: saving final design.", run_label)
             self._save_design_after_simulation()
             self._update_status(workspace, "saved_after_simulation")
 
+            LOGGER.info("%s: closing EMTP.", run_label)
             self._close_design_and_emtp()
             self._update_status(workspace, "emtp_closed")
 
             self._cleanup_run_workspace(workspace)
             self._update_status(workspace, "completed")
+            LOGGER.info("%s: copied ECF removed.", run_label)
 
         except Exception as error:
             try:
@@ -78,6 +111,13 @@ class RunWorker:
                     "failed",
                     error=f"{type(error).__name__}: {error}",
                 )
+            LOGGER.exception(
+                "%s: failed after %.1f s: %s: %s",
+                run_label,
+                perf_counter() - started_timer,
+                type(error).__name__,
+                error,
+            )
             return WorkerResult(
                 execution_id=execution_id,
                 study_id=worker_input.study_id,
@@ -89,6 +129,9 @@ class RunWorker:
                 error=f"{type(error).__name__}: {error}",
             )
 
+        LOGGER.info(
+            "%s: completed in %.1f s.", run_label, perf_counter() - started_timer
+        )
         return WorkerResult(
             execution_id=execution_id,
             study_id=worker_input.study_id,
@@ -211,8 +254,14 @@ class RunWorker:
 
 if __name__ == "__main__":
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
     # 1. Prepared study selected for this local proof of concept.
-    study_directory = Path(r"C:\MonteCarlo Cases\20260924_1708_f086d6")
+    study_directory = Path(r"C:\MonteCarlo Cases\20260928_1552_644292")
     run_id = 1
     tmax = 10.0
 
@@ -221,6 +270,11 @@ if __name__ == "__main__":
 
     with manifest_path.open("r", encoding="utf-8-sig") as stream:
         manifest = json.load(stream)
+    if int(manifest.get("schema_version", 0)) != 2:
+        raise ValueError(
+            "This proof of concept requires a study generated with schema version 2. "
+            "Rebuild the study to include unit Zone metadata."
+        )
 
     parameter_file = None
     for entry in manifest.get("parameter_files", []):
@@ -248,12 +302,24 @@ if __name__ == "__main__":
             f"Run {run_id} is indexed by '{parameter_path.name}' but is missing from it."
         )
 
+    units_by_id = {str(unit["unit_id"]): unit for unit in manifest.get("units", [])}
+
+    def build_worker_unit(run_unit: dict[str, object]) -> UnitParameters:
+        unit_id = str(run_unit["unit_id"])
+        try:
+            unit_metadata = units_by_id[unit_id]
+        except KeyError as error:
+            raise KeyError(
+                f"Run {run_id} references unknown unit '{unit_id}'."
+            ) from error
+        return UnitParameters.from_dict({**unit_metadata, **run_unit})
+
     worker_input = WorkerInput(
         study_id=str(manifest["study_id"]),
         run_id=run_id,
         source_model_path=(study_directory / manifest["model"]["file"]).resolve(),
         run_directory=study_directory / "runs" / f"run_{run_id:06d}",
-        units=tuple(UnitParameters.from_dict(item) for item in run_data["units"]),
+        units=tuple(build_worker_unit(item) for item in run_data["units"]),
         simulation={**manifest.get("simulation", {}), "tmax": tmax},
     )
 

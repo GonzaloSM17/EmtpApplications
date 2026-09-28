@@ -7,36 +7,44 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-WORKER_INPUT_SCHEMA_VERSION = 1
+WORKER_INPUT_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
 class UnitParameters:
     """The data used to parameterize one plant in a worker run."""
 
+    unit_id: str
     unit_path: str
     generator_name: str
     generator_type: str
+    zone: str
     in_service: int
     parameters: dict[str, float] = field(default_factory=dict)
     design_variables: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if not self.unit_id:
+            raise ValueError("unit_id cannot be empty.")
         if not self.unit_path:
             raise ValueError("unit_path cannot be empty.")
         if not self.generator_name:
             raise ValueError("generator_name cannot be empty.")
         if not self.generator_type:
             raise ValueError("generator_type cannot be empty.")
+        if not self.zone:
+            raise ValueError("zone cannot be empty.")
         if self.in_service not in (0, 1):
             raise ValueError("in_service must be 0 or 1.")
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> UnitParameters:
         return cls(
+            unit_id=str(data["unit_id"]),
             unit_path=str(data["unit_path"]),
             generator_name=str(data["generator_name"]),
             generator_type=str(data["generator_type"]),
+            zone=str(data["zone"]),
             in_service=int(data["in_service"]),
             parameters={
                 str(name): float(value)
@@ -51,9 +59,11 @@ class UnitParameters:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "unit_id": self.unit_id,
             "unit_path": self.unit_path,
             "generator_name": self.generator_name,
             "generator_type": self.generator_type,
+            "zone": self.zone,
             "in_service": self.in_service,
             "parameters": self.parameters,
             "design_variables": self.design_variables,
