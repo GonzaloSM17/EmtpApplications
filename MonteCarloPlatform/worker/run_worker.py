@@ -17,7 +17,7 @@ from com_client import EmtpComClient
 from emtp_utils import Design, Simulation
 from MonteCarloPlatform.worker.plant_setter import PlantSetter, PlantSetterReport
 from MonteCarloPlatform.worker.result import WorkerResult
-from MonteCarloPlatform.worker.task import UnitParameters, WorkerInput
+from MonteCarloPlatform.worker.task import WorkerInput
 from MonteCarloPlatform.worker.workspace import PreparedRunWorkspace, RunWorkspace
 
 LOGGER = logging.getLogger(__name__)
@@ -27,9 +27,11 @@ class RunWorker:
     """Execute the currently implemented stages for one run task."""
 
     def __init__(self) -> None:
+
         self._emtp_client: EmtpComClient | None = None
         self._emtp_object = None
         self._design_is_open = False
+        self._run_log_handler: logging.FileHandler | None = None
 
     def execute(self, worker_input: WorkerInput) -> WorkerResult:
         started_at = datetime.now().astimezone()
@@ -42,6 +44,7 @@ class RunWorker:
         try:
             workspace = self._preparing_workspace(worker_input)
             self._update_status(workspace, "workspace_ready")
+            self._configure_run_logging(workspace)
             LOGGER.info("%s: workspace prepared.", run_label)
 
             LOGGER.info("%s: starting EMTP.", run_label)
@@ -96,9 +99,13 @@ class RunWorker:
             self._close_design_and_emtp()
             self._update_status(workspace, "emtp_closed")
 
-            self._cleanup_run_workspace(workspace)
-            self._update_status(workspace, "completed")
-            LOGGER.info("%s: copied ECF removed.", run_label)
+            removed_files = self._cleanup_run_workspace(workspace)
+            self._update_status(
+                workspace,
+                "completed",
+                removed_files=removed_files,
+            )
+            LOGGER.info("%s: removed %d non-retained files.", run_label, removed_files)
 
         except Exception as error:
             try:
@@ -118,6 +125,7 @@ class RunWorker:
                 type(error).__name__,
                 error,
             )
+            self._close_run_logging()
             return WorkerResult(
                 execution_id=execution_id,
                 study_id=worker_input.study_id,
@@ -125,27 +133,24 @@ class RunWorker:
                 state="failed",
                 started_at=started_at,
                 finished_at=datetime.now().astimezone(),
-                artifacts={},
+                artifacts=self._artifacts(workspace),
                 error=f"{type(error).__name__}: {error}",
             )
 
         LOGGER.info(
             "%s: completed in %.1f s.", run_label, perf_counter() - started_timer
         )
-        return WorkerResult(
+        result = WorkerResult(
             execution_id=execution_id,
             study_id=worker_input.study_id,
             run_id=worker_input.run_id,
             state="completed",
             started_at=started_at,
             finished_at=datetime.now().astimezone(),
-            artifacts={
-                "directory": str(workspace.directory),
-                "run_input": str(workspace.run_json_path),
-                "parameters": str(workspace.parameters_csv_path),
-                "status": str(workspace.status_path),
-            },
+            artifacts=self._artifacts(workspace),
         )
+        self._close_run_logging()
+        return result
 
     def _preparing_workspace(self, worker_input: WorkerInput) -> PreparedRunWorkspace:
         """Create the run folder and its initial files before EMTP is opened."""
@@ -214,9 +219,57 @@ class RunWorker:
         if close_error is not None:
             raise close_error
 
-    def _cleanup_run_workspace(self, workspace: PreparedRunWorkspace) -> None:
-        """Remove run artifacts that are not required after simulation."""
-        workspace.model_path.unlink(missing_ok=True)
+    def _configure_run_logging(self, workspace: PreparedRunWorkspace) -> None:
+        """Write this worker's lifecycle events to its own run folder."""
+        self._close_run_logging()
+        handler = logging.FileHandler(
+            workspace.directory / "worker.log",
+            encoding="utf-8",
+        )
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s | %(levelname)s | %(message)s",
+                datefmt="%H:%M:%S",
+            )
+        )
+        LOGGER.setLevel(logging.INFO)
+        LOGGER.addHandler(handler)
+        self._run_log_handler = handler
+
+    def _close_run_logging(self) -> None:
+        """Release the file handler before another run can start."""
+        if self._run_log_handler is None:
+            return
+        LOGGER.removeHandler(self._run_log_handler)
+        self._run_log_handler.close()
+        self._run_log_handler = None
+
+    @staticmethod
+    def _artifacts(workspace: PreparedRunWorkspace | None) -> dict[str, str]:
+        if workspace is None:
+            return {}
+        return {
+            "directory": str(workspace.directory),
+            "run_input": str(workspace.run_json_path),
+            "parameters": str(workspace.parameters_csv_path),
+            "status": str(workspace.status_path),
+            "log": str(workspace.directory / "worker.log"),
+        }
+
+    @staticmethod
+    def _cleanup_run_workspace(workspace: PreparedRunWorkspace) -> int:
+        """Keep selected outputs and remove every other file from a completed run."""
+        retained_extensions = {".mda", ".m", ".net", ".csv", ".json", ".log"}
+        removed_count = 0
+        for path in workspace.directory.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() in retained_extensions:
+                continue
+            path.unlink()
+            removed_count += 1
+        return removed_count
 
     @staticmethod
     def _update_status(
@@ -225,6 +278,7 @@ class RunWorker:
         *,
         error: str | None = None,
         parameterized_devices: int | None = None,
+        removed_files: int | None = None,
     ) -> None:
         """Persist the current worker state for the orchestrator and GUI."""
         previous_data: dict[str, object] = {}
@@ -240,10 +294,14 @@ class RunWorker:
         }
         if "parameterized_devices" in previous_data:
             data["parameterized_devices"] = previous_data["parameterized_devices"]
+        if "removed_files" in previous_data:
+            data["removed_files"] = previous_data["removed_files"]
         if error is not None:
             data["error"] = error
         if parameterized_devices is not None:
             data["parameterized_devices"] = parameterized_devices
+        if removed_files is not None:
+            data["removed_files"] = removed_files
 
         temporary_path = workspace.status_path.with_suffix(".json.tmp")
         with temporary_path.open("w", encoding="utf-8", newline="\n") as stream:
@@ -262,65 +320,14 @@ if __name__ == "__main__":
 
     # 1. Prepared study selected for this local proof of concept.
     study_directory = Path(r"C:\MonteCarlo Cases\20260928_1552_644292")
-    run_id = 1
+    run_id = 3
     tmax = 10.0
 
-    # 2. Build the WorkerInput that an orchestrator will later send.
-    manifest_path = study_directory / "manifest.json"
-
-    with manifest_path.open("r", encoding="utf-8-sig") as stream:
-        manifest = json.load(stream)
-    if int(manifest.get("schema_version", 0)) != 2:
-        raise ValueError(
-            "This proof of concept requires a study generated with schema version 2. "
-            "Rebuild the study to include unit Zone metadata."
-        )
-
-    parameter_file = None
-    for entry in manifest.get("parameter_files", []):
-        if int(entry["first_run"]) <= run_id <= int(entry["last_run"]):
-            parameter_file = entry.get("json_file") or entry.get("file")
-            break
-
-    if parameter_file is None:
-        raise KeyError(f"Run {run_id} is not indexed by the study manifest.")
-
-    parameter_path = study_directory / parameter_file
-    with parameter_path.open("r", encoding="utf-8-sig") as stream:
-        parameter_block = json.load(stream)
-
-    run_data = next(
-        (
-            item
-            for item in parameter_block.get("runs", [])
-            if int(item["run_id"]) == run_id
-        ),
-        None,
-    )
-    if run_data is None:
-        raise RuntimeError(
-            f"Run {run_id} is indexed by '{parameter_path.name}' but is missing from it."
-        )
-
-    units_by_id = {str(unit["unit_id"]): unit for unit in manifest.get("units", [])}
-
-    def build_worker_unit(run_unit: dict[str, object]) -> UnitParameters:
-        unit_id = str(run_unit["unit_id"])
-        try:
-            unit_metadata = units_by_id[unit_id]
-        except KeyError as error:
-            raise KeyError(
-                f"Run {run_id} references unknown unit '{unit_id}'."
-            ) from error
-        return UnitParameters.from_dict({**unit_metadata, **run_unit})
-
+    # 2. The worker order has only the three values an orchestrator provides.
     worker_input = WorkerInput(
-        study_id=str(manifest["study_id"]),
+        study_directory=study_directory,
         run_id=run_id,
-        source_model_path=(study_directory / manifest["model"]["file"]).resolve(),
-        run_directory=study_directory / "runs" / f"run_{run_id:06d}",
-        units=tuple(build_worker_unit(item) for item in run_data["units"]),
-        simulation={**manifest.get("simulation", {}), "tmax": tmax},
+        tmax=tmax,
     )
 
     # print(worker_input)
