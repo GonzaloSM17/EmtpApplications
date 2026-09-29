@@ -119,8 +119,6 @@ class WorkerInput:
         source_model_path = self._resolve_model_path(study_directory, manifest)
         run_root = self._resolve_run_root(study_directory, manifest)
         run_directory = run_root / f"run_{self.run_id:06d}"
-        if run_directory.exists():
-            raise FileExistsError(f"Run directory already exists: {run_directory}")
 
         parameter_block_path, run_data = self._resolve_run_data(
             study_directory=study_directory,

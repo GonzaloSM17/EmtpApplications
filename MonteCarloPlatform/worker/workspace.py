@@ -9,7 +9,7 @@ import json
 import os
 from pathlib import Path
 from secrets import token_hex
-from shutil import copy2
+from shutil import copy2, rmtree
 from typing import Any
 
 from MonteCarloPlatform.worker.task import WorkerInput
@@ -38,9 +38,8 @@ class RunWorkspace:
             raise FileNotFoundError(f"Base model not found: {source_model_path}")
 
         final_directory = self.worker_input.run_directory
+        self._reset_run_directory(final_directory)
         final_directory.parent.mkdir(parents=True, exist_ok=True)
-        if final_directory.exists():
-            raise FileExistsError(f"Run directory already exists: {final_directory}")
 
         temporary_directory = final_directory.parent / (
             f".{self.worker_input.run_name}_{token_hex(3)}.tmp"
@@ -52,19 +51,24 @@ class RunWorkspace:
         parameters_csv_path = temporary_directory / "parameters.csv"
         status_path = temporary_directory / "status.json"
 
-        copy2(source_model_path, model_path)
-        self._write_json_atomically(run_json_path, self.worker_input.to_dict())
-        self._write_parameters_csv(parameters_csv_path)
-        self._write_json_atomically(
-            status_path,
-            {
-                "study_id": self.worker_input.study_id,
-                "run_id": self.worker_input.run_id,
-                "state": "workspace_ready",
-                "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-            },
-        )
-        os.replace(temporary_directory, final_directory)
+        try:
+            copy2(source_model_path, model_path)
+            self._write_json_atomically(run_json_path, self.worker_input.to_dict())
+            self._write_parameters_csv(parameters_csv_path)
+            self._write_json_atomically(
+                status_path,
+                {
+                    "study_id": self.worker_input.study_id,
+                    "run_id": self.worker_input.run_id,
+                    "state": "workspace_ready",
+                    "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                },
+            )
+            os.replace(temporary_directory, final_directory)
+        except Exception:
+            if temporary_directory.exists():
+                rmtree(temporary_directory)
+            raise
 
         return PreparedRunWorkspace(
             worker_input=self.worker_input,
@@ -74,6 +78,22 @@ class RunWorkspace:
             parameters_csv_path=final_directory / parameters_csv_path.name,
             status_path=final_directory / status_path.name,
         )
+
+    def _reset_run_directory(self, final_directory: Path) -> None:
+        """Remove only this worker's previous run workspace before rebuilding it."""
+        run_root = final_directory.parent.resolve()
+        expected_directory = run_root / self.worker_input.run_name
+        if final_directory != expected_directory:
+            raise ValueError("Worker run directory does not match its run identifier.")
+        if not run_root.is_relative_to(self.worker_input.study_directory):
+            raise ValueError("Worker run directory must remain inside the study directory.")
+        if not final_directory.exists() and not final_directory.is_symlink():
+            return
+        if final_directory.is_symlink():
+            raise RuntimeError(f"Refusing to reset symbolic-link run directory: {final_directory}")
+        if not final_directory.is_dir():
+            raise NotADirectoryError(f"Run path is not a directory: {final_directory}")
+        rmtree(final_directory)
 
     def _write_parameters_csv(self, path: Path) -> None:
         headers = (
