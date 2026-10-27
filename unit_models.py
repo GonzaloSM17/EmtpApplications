@@ -114,6 +114,14 @@ class EmtpUnit(XmlDevice):
     def libtype(self) -> str:
         return self.unit_object.getAttribute("LibType")
 
+    def get_zone(self) -> str:
+        """Read the Zone attribute of the upper/template object."""
+        return self.object.getAttribute("Zone") or ""
+
+    def set_zone(self, value: str) -> None:
+        """Set Zone directly; it is not a value held in XMLDataGrids."""
+        self.object.setAttribute("Zone", str(value))
+
 
 @dataclass
 class RenewableEnergySource(EmtpUnit):
