@@ -250,9 +250,14 @@ class OperationalScenarioManager:
             elif parameter == "bus_type":
                 if kind is not GenerationKind.SYNCHRONOUS:
                     raise ValueError("Bus Type applies only to synchronous units.")
-                bus_type = {"PQ": "1", "PV": "2", "SLACK": "3"}.get(
-                    value.upper(), value
-                )
+                bus_type = {
+                    "PQ": "1",
+                    "PQ (1)": "1",
+                    "PV": "2",
+                    "PV (2)": "2",
+                    "SLACK": "3",
+                    "SLACK (3)": "3",
+                }.get(value.upper(), value)
                 if bus_type not in {"1", "2", "3"}:
                     raise ValueError("Bus Type must be PQ, PV, Slack, 1, 2 or 3.")
                 normalized[parameter] = bus_type

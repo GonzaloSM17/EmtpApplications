@@ -40,6 +40,7 @@ class GenerationCatalogTests(unittest.TestCase):
             {
                 "Name": "PV_A",
                 "LibType": "PV_TEMPLATE",
+                "Zone": "North",
                 "XMLDataGrids": (
                     "<grid>"
                     "<row><cell>0</cell><cell>in_service</cell><cell>1</cell></row>"
@@ -77,6 +78,9 @@ class GenerationCatalogTests(unittest.TestCase):
 
         self.assertEqual([device.kind for device in devices], list(GenerationKind))
         self.assertEqual(devices[0].template_name, "PV_A")
+        self.assertEqual(devices[0].zone, "North")
+        self.assertIs(devices[0].object, pv)
+        self.assertEqual(devices[0].unit_object.getAttribute("Name"), "PV mask")
         self.assertEqual(devices[4].internal_model_path, "SG_A/Machine")
 
         masks = OperationalScenarioManager(

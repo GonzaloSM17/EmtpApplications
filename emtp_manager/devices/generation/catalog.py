@@ -17,10 +17,13 @@ class GenerationKind(StrEnum):
 
 @dataclass(frozen=True)
 class GenerationDevice:
-    """One recognized generation template and its internal model reference.
+    """One recognized generation chain from :class:`unit_extractor.UnitExtractor`.
 
-    This is the Devices-domain representation.  It deliberately does not
-    expose scenario-mask fields: those belong to Operational Scenario Manager.
+    ``object`` is the upper template.  It provides contextual attributes such
+    as ``Zone`` and hosts the operational-scenario mask.  ``unit_object`` is
+    the internal device from which the future Devices parameter adapters will
+    read their parameters.  Keeping these two references explicit prevents the
+    two management layers from being conflated.
     """
 
     kind: GenerationKind
@@ -28,8 +31,8 @@ class GenerationDevice:
     template_lib_type: str
     internal_model_name: str
     internal_model_lib_type: str
-    template_device: Any = field(repr=False, compare=False, default=None)
-    internal_model_device: Any = field(repr=False, compare=False, default=None)
+    object: Any = field(repr=False, compare=False, default=None)
+    unit_object: Any = field(repr=False, compare=False, default=None)
 
     @property
     def display_name(self) -> str:
@@ -38,6 +41,24 @@ class GenerationDevice:
     @property
     def internal_model_path(self) -> str:
         return f"{self.template_name}/{self.internal_model_name}"
+
+    @property
+    def zone(self) -> str:
+        """Read the contextual Zone from the upper template object."""
+        if self.object is None:
+            return ""
+        value = self.object.getAttribute("Zone")
+        return "" if value is None else str(value)
+
+    @property
+    def template_device(self) -> Any:
+        """Compatibility alias; prefer ``object`` in new manager code."""
+        return self.object
+
+    @property
+    def internal_model_device(self) -> Any:
+        """Compatibility alias; prefer ``unit_object`` in new manager code."""
+        return self.unit_object
 
 
 class GenerationDeviceCatalog:
@@ -130,8 +151,8 @@ class GenerationDeviceCatalog:
             template_lib_type=self._attribute(parent_device, "LibType"),
             internal_model_name=internal_model_name,
             internal_model_lib_type=self._attribute(internal_model_device, "LibType"),
-            template_device=parent_device,
-            internal_model_device=internal_model_device,
+            object=parent_device,
+            unit_object=internal_model_device,
         )
 
     def _find_child_by_lib_type(self, parent_device: Any, lib_type: str) -> Any | None:

@@ -48,6 +48,13 @@ class EmtpSession:
         self.design_path = design_path
         return design_path
 
+    def save_design(self) -> Path:
+        """Persist the currently open working design through the EMTP COM API."""
+        if self._client is None or self.design_path is None:
+            raise RuntimeError("No EMTP design is open to save.")
+        self.emtp_object.saveDesign()
+        return self.design_path
+
     def disconnect(self) -> None:
         """Close the EMTP session explicitly when the caller requests it."""
         if self._client is not None:

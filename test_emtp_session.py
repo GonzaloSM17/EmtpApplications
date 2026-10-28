@@ -8,9 +8,13 @@ from emtp_manager.integration.session import EmtpSession
 class FakeGlobalObject:
     def __init__(self) -> None:
         self.opened_paths: list[str] = []
+        self.save_count = 0
 
     def openDesign(self, path: str) -> None:
         self.opened_paths.append(path)
+
+    def saveDesign(self) -> None:
+        self.save_count += 1
 
 
 class FakeClient:
@@ -41,6 +45,9 @@ class EmtpSessionTests(unittest.TestCase):
         self.assertEqual(opened_path.name, "network.ecf")
         self.assertEqual(len(clients), 1)
         self.assertEqual(clients[0].emtp_object.opened_paths, [str(opened_path)])
+
+        self.assertEqual(session.save_design(), opened_path)
+        self.assertEqual(clients[0].emtp_object.save_count, 1)
 
     def test_open_design_rejects_non_ecf_files_before_creating_emtp(self) -> None:
         with TemporaryDirectory() as temporary_directory:
